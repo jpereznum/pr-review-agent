@@ -1,0 +1,23 @@
+# Editor / OS
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local test installs (in case someone runs install.sh inside the repo)
+/.claude/state/pr-reviews.json
+/.claude/audit/
+/.claude/settings.local.json
+
+# Anything secret-shaped that ended up in the repo by mistake
+.env
+.env.*
+*.pem
+*.key
+secrets/
