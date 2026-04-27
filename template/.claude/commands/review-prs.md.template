@@ -198,6 +198,36 @@ curl -s -u "{{REVIEWER_USERNAME}}:$FORGEJO_PASSWORD" -H "cf-access-token: $CF_TO
 
 9. **Avoid inline shell expansions and inline heredocs in Bash tool calls.** Claude Code's harness has content-based safety checks that fire on commands containing `${VAR}`-style expansions, `[[ ... == *"x"* ]]` patterns, embedded heredocs (`<<EOF`, `<<'PY'`), or composite `if/then/fi` statements with quotes. These checks prompt for user approval **regardless of the allowlist**. To avoid this, use the **write-script-then-run-script** pattern: write the logic to `/tmp/script_name.sh` or `/tmp/script_name.py` using the Write tool, then execute it as `bash /tmp/script_name.sh` or `python3 /tmp/script_name.py`. The harness sees a clean, simple command; the script does the complex work internally. **Do not put inline `<<HEREDOC` content into Bash tool calls — write the file first, run the file second.** Single-line bash with simple variable references (e.g., `mkdir -p .claude/audit/$DAY`) is fine; multi-line conditionals and heredocs are not.
 
+10. **Every script that needs Forgejo credentials MUST source `.claude/env` itself.** Each Bash tool call runs in a fresh subshell. Variables set in one call (including `$FORGEJO_PASSWORD`) do NOT persist to the next. Step 0's pre-flight loads env into the orchestrator's bash, but `/tmp/*.sh` scripts the agent writes don't inherit that. Every script that calls Forgejo MUST start with:
+
+    ```bash
+    #!/usr/bin/env bash
+    set -e
+    if [ -f .claude/env ]; then
+      set -a
+      source .claude/env
+      set +a
+    fi
+    ```
+
+    If `$FORGEJO_PASSWORD` is unset after this and the script needs it, the script must `exit 1` with a clear error. Do NOT inline a literal value to fall back. Hard Rule 7 still applies inside scripts.
+
+11. **Normalize Forgejo URLs to the public host before output.** Forgejo's API returns `html_url` fields with the internal cluster host (e.g., `http://192.168.1.134:30142/...`) that aren't reachable from outside the LAN. Whenever you write a URL to an audit record, a Slack DM, or a Forgejo review body, **rewrite the host to `{{FORGEJO_BASE_URL}}`** first. The pattern:
+
+    ```python
+    def normalize_url(url, base_url="{{FORGEJO_BASE_URL}}"):
+        """Rewrite Forgejo internal URLs to the public host."""
+        if not url:
+            return url
+        # Match common internal hosts
+        for internal in ("http://192.168.1.134:30142", "http://127.0.0.1:3000"):
+            if url.startswith(internal):
+                return base_url + url[len(internal):]
+        return url
+    ```
+
+    Apply to: PR `html_url`, review URLs returned from POST responses, Slack DM links, anything user-facing or persisted.
+
 ## Audit logging
 
 Every processed PR produces one audit record. Records live under `.claude/audit/YYYY-MM-DD/` keyed by date. Two files per run:
@@ -445,15 +475,24 @@ If anything from 4a–4e fails (network error, malformed model output, Codex cra
 
 #### 4a. Get the diff
 
-- **Round 1 (full PR diff):** fetch via the `.diff` endpoint:
+Per Hard Rule 9, prefer to write a small script to `/tmp/fetch_diff.sh` and run it. Per Hard Rule 10, the script MUST source `.claude/env` itself.
+
+- **Round 1 (full PR diff):** fetch via the `.diff` endpoint. Inside the script:
   ```bash
+  #!/usr/bin/env bash
+  set -e
+  if [ -f .claude/env ]; then set -a; source .claude/env; set +a; fi
+  CF_TOKEN=$(cat /tmp/cf_token.txt 2>/dev/null || echo "")
   curl -s -u "{{REVIEWER_USERNAME}}:$FORGEJO_PASSWORD" -H "cf-access-token: $CF_TOKEN" \
     -H "Accept: application/vnd.diff" \
-    "{{FORGEJO_BASE_URL}}/{{REPO}}/pulls/${PR_NUMBER}.diff"
+    "{{FORGEJO_BASE_URL}}/{{REPO}}/pulls/${1}.diff" \
+    > "/tmp/pr_${1}.diff"
   ```
-- **Re-review (incremental diff):** fetch the branch via the auth'd git pattern (see reference file), then `git diff <last_reviewed_sha>..FETCH_HEAD`. This is the diff Claude and Codex actually review on round 2+ — the author's response to prior feedback only, not the whole PR.
+- **Re-review (incremental diff):** fetch the branch via the auth'd git pattern, then `git diff <last_reviewed_sha>..FETCH_HEAD`. This is the diff Claude and Codex actually review on round 2+ — the author's response to prior feedback only, not the whole PR.
 
 **Save the diff to the audit folder immediately.** Compute `diff_stats` (files_changed, lines_added, lines_removed) — `git apply --numstat` or a simple parse works.
+
+Per Hard Rule 11, when extracting any URL fields from the PR metadata (e.g., `html_url`), normalize the host before persisting them. Internal hosts (`192.168.1.134:30142`, `127.0.0.1:3000`) get rewritten to `{{FORGEJO_BASE_URL}}`.
 
 #### 4b. Round 1 — Claude reviews
 
