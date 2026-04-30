@@ -196,7 +196,57 @@ curl -s -u "{{REVIEWER_USERNAME}}:$FORGEJO_PASSWORD" -H "cf-access-token: $CF_TO
    This applies symmetrically to any other credential (`$CF_TOKEN`, API keys, tokens). The rule is: env-loaded or halt.
 8. **Stay within the project's allowlist.** This agent is configured with a tight permission allowlist in `.claude/settings.local.json`. If you find yourself wanting to run a command that doesn't match an existing allow pattern, **STOP and ask the user** instead of trying to find a workaround. Do not concatenate, base64-encode, write-then-execute, or otherwise reshape commands to evade the allowlist. The allowlist is a security boundary; treat it as one. Note: write-then-execute (writing a script to `/tmp/*.sh` or `/tmp/*.py` and then running it) is **explicitly allowed** — this is the recommended pattern for complex logic, see Hard Rule 9.
 
-9. **Avoid inline shell expansions and inline heredocs in Bash tool calls.** Claude Code's harness has content-based safety checks that fire on commands containing `${VAR}`-style expansions, `[[ ... == *"x"* ]]` patterns, embedded heredocs (`<<EOF`, `<<'PY'`), or composite `if/then/fi` statements with quotes. These checks prompt for user approval **regardless of the allowlist**. To avoid this, use the **write-script-then-run-script** pattern: write the logic to `/tmp/script_name.sh` or `/tmp/script_name.py` using the Write tool, then execute it as `bash /tmp/script_name.sh` or `python3 /tmp/script_name.py`. The harness sees a clean, simple command; the script does the complex work internally. **Do not put inline `<<HEREDOC` content into Bash tool calls — write the file first, run the file second.** Single-line bash with simple variable references (e.g., `mkdir -p .claude/audit/$DAY`) is fine; multi-line conditionals and heredocs are not.
+9. **Bash tool calls MUST be simple, single-purpose commands.** Claude Code's harness fires content-based safety checks (`Contains expansion`, `Contains command_substitution`, `Contains brace with quote character (expansion obfuscation)`, `Unhandled node type: string`) on the *shape* of the command. These prompt the user for approval **regardless of the allowlist** — no permission rule can silence them. The only way to avoid them is to keep Bash tool calls clean.
+
+   **The rule:** Every Bash tool call must be one of these shapes:
+
+   - A single command with at most one simple variable reference (e.g., `mkdir -p .claude/audit/$DAY`)
+   - A single script invocation (e.g., `bash /tmp/foo.sh`, `python3 /tmp/foo.py`, `/tmp/foo.sh 1914`)
+   - A read-only inspection (`ls`, `cat`, `wc -l`, `head`, `tail`, `git log`, `python3 -m json.tool < file`)
+
+   **All other shapes — including chains with `&&`, command substitutions like `$(...)`, multi-variable assignments, embedded heredocs, conditional blocks — MUST go inside a `/tmp/*.sh` or `/tmp/*.py` script that the agent writes via the Write tool first and then runs with one of the simple shapes above.**
+
+   **FORBIDDEN — these will prompt the user every single time:**
+
+   ```bash
+   # FORBIDDEN: command substitution in tool call
+   DAY=$(date -u +%Y-%m-%d) && TS=$(date -u +%H%M%S) && mkdir -p ".claude/audit/$DAY"
+
+   # FORBIDDEN: heredoc in tool call
+   cat > /tmp/audit.json <<'JSON'
+   {"verdict": "approve"}
+   JSON
+
+   # FORBIDDEN: long && chain with assignments
+   RUN_ID="$1" && DAY=$2 && cp /tmp/diff "$RUN_ID.diff" && wc -l "$RUN_ID.diff"
+
+   # FORBIDDEN: inline conditional
+   if [ -z "$X" ]; then echo missing; else echo ok; fi
+   ```
+
+   **ALLOWED — these run cleanly without prompting:**
+
+   ```bash
+   # ALLOWED: simple invocation of a script that contains all the logic
+   bash /tmp/init_run.sh 1914
+
+   # ALLOWED: simple file copy
+   cp /tmp/pr_1914.diff .claude/audit/2026-04-28/run_1914.diff
+
+   # ALLOWED: read-only inspection
+   wc -l .claude/audit/2026-04-28/run_1914.diff
+
+   # ALLOWED: single mkdir with one variable (no substitution chain)
+   mkdir -p .claude/audit/2026-04-28
+   ```
+
+   **The pattern:** any time the orchestrator workflow needs `date`, `pgrep`, `ps`, or any `$()` substitution; any time it needs to chain three or more steps; any time it needs a heredoc — write that logic into a `/tmp/*.sh` script first using the Write tool. The script can use all the bash features it wants. The Bash tool call only invokes the script.
+
+   **Heredoc content gets written to a file via the Write tool, NOT via `cat <<EOF` in a Bash call.** If you need to write a JSON file:
+   - WRONG: `cat > /tmp/x.json <<'JSON' ... JSON`
+   - RIGHT: Use the Write tool with `path=/tmp/x.json` and the JSON as content.
+
+   This is not a soft preference. Following it eliminates ~20 approval prompts per run. Violating it generates them.
 
 10. **Every script that needs Forgejo credentials MUST source `.claude/env` itself.** Each Bash tool call runs in a fresh subshell. Variables set in one call (including `$FORGEJO_PASSWORD`) do NOT persist to the next. Step 0's pre-flight loads env into the orchestrator's bash, but `/tmp/*.sh` scripts the agent writes don't inherit that. Every script that calls Forgejo MUST start with:
 
