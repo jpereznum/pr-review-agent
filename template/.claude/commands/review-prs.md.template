@@ -278,6 +278,124 @@ curl -s -u "{{REVIEWER_USERNAME}}:$FORGEJO_PASSWORD" -H "cf-access-token: $CF_TO
 
     Apply to: PR `html_url`, review URLs returned from POST responses, Slack DM links, anything user-facing or persisted.
 
+12. **NEVER modify the user's working tree, branches, index, or stash.** This is absolute. The user's main checkout (the directory the agent was invoked in) is sacred. Forbidden operations on the main checkout include:
+
+    - `git checkout <branch>` (changes branch)
+    - `git checkout <ref> -- <file>` (changes file *and* stages it — this is what bit us in PR #1926)
+    - `git switch <branch>`
+    - `git stash` / `git stash pop`
+    - `git reset` of any kind
+    - `git pull`, `git fetch <remote> <branch>:<branch>`
+    - Any direct file edit to a tracked file (Write tool, `cp`, `mv`, `>` redirection, `sed -i`)
+    - Running migrations or `alembic upgrade` against the user's working tree
+    - `pnpm install`, `pip install`, etc. — these can change `package-lock.json`, `.venv/`, or other tracked artifacts
+
+    **Verification against branch code MUST use a `git worktree`** in `/tmp/scratch_<run_id>/`. Pattern:
+
+    ```bash
+    #!/usr/bin/env bash
+    # /tmp/setup_worktree.sh — call as: bash /tmp/setup_worktree.sh <run_id> <branch>
+    set -e
+    RUN_ID="$1"
+    BRANCH="$2"
+    WT="/tmp/scratch_${RUN_ID}"
+    git worktree add --detach "$WT" "origin/${BRANCH}"
+    echo "$WT"
+    ```
+
+    ```bash
+    #!/usr/bin/env bash
+    # /tmp/teardown_worktree.sh — call as: bash /tmp/teardown_worktree.sh <run_id>
+    set -e
+    RUN_ID="$1"
+    WT="/tmp/scratch_${RUN_ID}"
+    git worktree remove --force "$WT" 2>/dev/null || rm -rf "$WT"
+    ```
+
+    All test execution, type-checking, linting, and other tooling runs **inside the worktree**, not the main checkout. The worktree shares the `.git` database (so it's fast to set up) but has its own isolated working files. Operations inside the worktree do NOT affect the user's main checkout.
+
+    **Self-check before returning:** before the orchestrator finishes its run (success or failure), it MUST verify that the user's main working tree is in the same state it was when the run started:
+
+    ```bash
+    # Run before the run does anything that could touch the working tree:
+    git -C <main_checkout> rev-parse HEAD > /tmp/pretest_head_${RUN_ID}.txt
+    git -C <main_checkout> status --porcelain > /tmp/pretest_status_${RUN_ID}.txt
+
+    # Run before the run terminates:
+    git -C <main_checkout> rev-parse HEAD > /tmp/posttest_head_${RUN_ID}.txt
+    git -C <main_checkout> status --porcelain > /tmp/posttest_status_${RUN_ID}.txt
+    diff /tmp/pretest_head_${RUN_ID}.txt /tmp/posttest_head_${RUN_ID}.txt
+    diff /tmp/pretest_status_${RUN_ID}.txt /tmp/posttest_status_${RUN_ID}.txt
+    ```
+
+    If either `diff` shows output, the agent has violated Rule 12. STOP, do NOT post the review, write a high-priority alert to the audit folder describing what changed, and DM the user. The user's working tree is more important than the review.
+
+    The pr-reviewer subagent is bound by this rule too. Pass it the worktree path as input, NOT the main checkout. The subagent must NEVER reach into the main checkout for any reason.
+
+13. **Schema-change detection and revert (Approach 3 — heuristic + snapshot + revert).** When the agent runs tests or other tooling that may mutate the database, it MUST follow this protocol:
+
+    **a. Heuristic scan before running anything against the DB.** Look for schema-change signals in the diff and test files:
+
+    - Files matching `migrations/*.py`, `alembic/versions/*.py`
+    - Diff content containing `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE INDEX`, `DROP INDEX`, `CREATE FUNCTION`, `DROP FUNCTION`, `CREATE TRIGGER`, `DROP TRIGGER`, `CREATE SCHEMA`, `DROP SCHEMA`, `CREATE DATABASE`, `DROP DATABASE`, `TRUNCATE`
+    - SQLAlchemy model class definitions added/modified in the diff (`class .* Base`, `__tablename__`, `Column(...)`)
+    - Test code that calls `alembic upgrade`, `Base.metadata.create_all`, or raw `engine.execute("CREATE...")`
+
+    If any signal matches, schema-change risk is **detected**. If none, proceed without the snapshot/revert dance.
+
+    **b. Decide whether to ask first.**
+
+    - If the run is **interactive** (a human is at the keyboard, i.e., the orchestrator was invoked via `/review-prs` from a Claude Code session): pause and ask the user. The prompt should name the schema-change signals found. Two paths:
+      - User declines: skip the test/tool that needs schema changes, continue review with what's already verified, note the skip in the verdict.
+      - User approves: proceed to step (c).
+    - If the run is **async** (cron, webhook, or any non-interactive trigger detected by the absence of a TTY or via an explicit `ASYNC_RUN=1` env flag): proceed automatically to step (c). No prompt.
+
+    **c. Take a pre-test schema snapshot.** Before any test runs against the DB:
+
+    ```bash
+    pg_dump --schema-only --no-owner --no-privileges \
+      --dbname="$DATABASE_URL" \
+      > /tmp/schema_pre_${RUN_ID}.sql
+    ```
+
+    Compute its hash for fast comparison: `md5 /tmp/schema_pre_${RUN_ID}.sql`.
+
+    **d. Run the tests/tools.** Tests run against the actual dev DB. Data side effects (INSERT/UPDATE/DELETE) are accepted; only schema changes are guarded.
+
+    **e. Take a post-test snapshot and diff.**
+
+    ```bash
+    pg_dump --schema-only --no-owner --no-privileges \
+      --dbname="$DATABASE_URL" \
+      > /tmp/schema_post_${RUN_ID}.sql
+    diff /tmp/schema_pre_${RUN_ID}.sql /tmp/schema_post_${RUN_ID}.sql > /tmp/schema_diff_${RUN_ID}.txt
+    ```
+
+    If `schema_diff_${RUN_ID}.txt` is empty: no schema change happened, proceed. If non-empty: revert is needed.
+
+    **f. Generate and apply the revert SQL.** The revert should restore the schema exactly to the pre-test state. The simplest robust pattern:
+
+    ```bash
+    # Drop everything that was added, then re-apply pre-test snapshot fragments
+    # for anything that was modified or removed.
+    # In practice, for most test-induced changes, dropping the new objects is
+    # sufficient. For ALTER TABLE changes (added columns), generate the reverse ALTER.
+    # The agent MUST write a revert SQL file to /tmp/schema_revert_${RUN_ID}.sql
+    # showing exactly what it intends to apply, then apply it via psql.
+    ```
+
+    Apply it: `psql --dbname="$DATABASE_URL" -v ON_ERROR_STOP=1 -f /tmp/schema_revert_${RUN_ID}.sql`
+
+    **g. Bail-safe on rollback failure.** If the revert SQL fails to apply (foreign key conflicts, blocking rows, syntax errors, anything):
+
+    - **DO NOT** retry with `DROP CASCADE`, `TRUNCATE`, or any forced operation. Those can take user data with them.
+    - **DO**: leave the schema in its current (mutated) state, write a high-priority alert to the audit folder (`{run_id}.SCHEMA_ALERT.md` with the full diff and intended revert SQL), DM the user via Slack with subject `[URGENT] PR review agent: schema change in dev DB requires manual revert`, and include the path to `/tmp/schema_pre_${RUN_ID}.sql`, `/tmp/schema_post_${RUN_ID}.sql`, and `/tmp/schema_revert_${RUN_ID}.sql` for the user to inspect and revert manually.
+    - The Forgejo review for this PR is NOT posted in this state. The agent halts the review pipeline; the schema integrity issue takes precedence.
+
+    **h. Post-revert verification.** After successful revert, take a third snapshot and confirm it matches pre-test. If it doesn't match exactly, fall through to (g) — bail-safe.
+
+    The full revert protocol is **mandatory whenever schema-change risk was detected**, even if the user authorized proceeding. Authorization is for "you may run a test that changes the schema"; it is NOT for "you may leave the schema changed." The agent's contract is: schema goes in, schema comes out unchanged, or the agent halts and alerts.
+
 ## Audit logging
 
 Every processed PR produces one audit record. Records live under `.claude/audit/YYYY-MM-DD/` keyed by date. Two files per run:
