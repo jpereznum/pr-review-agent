@@ -3,6 +3,7 @@
   "_comment_2": "Allow rules whitelist exactly the command shapes the orchestrator needs. Anything not matched will prompt the user.",
   "_comment_3": "Deny rules catch dangerous patterns that should NEVER run, even if they happen to match an allow rule.",
   "_comment_4": "Adjust the {{FORGEJO_BASE_URL}}, {{REPO}}, and {{REVIEWER_USERNAME}} placeholders to your values via the install script.",
+  "_comment_5": "Deliberately NOT included in deny: Bash(*sudo*), Bash(*ssh *), Bash(*scp *), Bash(*rsync *), Bash(git push*). These are commonly needed by other workflows that share .claude/settings.local.json with this agent (deployment, staging access, normal git operations). If you DO want them, add them to your local file after install. The PR review agent itself does not need any of them.",
   "permissions": {
     "allow": [
       "Bash(curl -s -u {{REVIEWER_USERNAME}}:* -H cf-access-token:* {{FORGEJO_BASE_URL}}/api/v1/repos/{{REPO}}/*)",
@@ -157,12 +158,6 @@
       "Bash(rm -rf ~)",
       "Bash(rm -rf $HOME*)",
 
-      "Bash(*sudo*)",
-      "Bash(*ssh *)",
-      "Bash(*scp *)",
-      "Bash(*rsync *)",
-
-      "Bash(git push*)",
       "Bash(git commit*)",
       "Bash(git config*)",
       "Bash(git clone*)",
