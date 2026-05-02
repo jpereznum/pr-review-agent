@@ -183,6 +183,7 @@
       "Read(**)",
       "Write(.claude/state/**)",
       "Write(.claude/audit/**)",
+      "Edit(.claude/audit/**)",
       "Write(/tmp/**)"
     ],
     "deny": [
