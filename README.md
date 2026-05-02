@@ -121,6 +121,52 @@ The agent will:
 
 If no PRs are assigned to you, the agent reports "nothing to do" and exits without writing audit records.
 
+## Automation options
+
+Three ways to run `/review-prs`, in increasing order of autonomy:
+
+### 1. Manual (default)
+
+You run `/review-prs` in Claude Code when you want a review pass. Best for first-time use and infrequent reviews.
+
+### 2. In-session scheduler (Claude Code's built-in cron)
+
+Claude Code provides scheduling primitives (`CronCreate` / `CronList` / `CronDelete`) that can fire `/review-prs` on a cron expression while a Claude Code session is open. Useful during your work day to pick up review requests automatically without remembering to trigger them.
+
+In any Claude Code session, ask:
+
+```
+Schedule /review-prs to run every 15 minutes, durable so it survives restarts.
+```
+
+Claude Code creates a recurring job. To inspect: *"List active cron jobs."* To cancel: *"Delete cron job <id>."*
+
+Important caveats:
+
+- **Session-bound by default.** The job dies when the terminal closes unless you ask for `durable: true`, which persists it to `.claude/scheduled_tasks.json` and survives Claude Code restarts.
+- **Auto-expires after 7 days.** Cron jobs are intentionally short-lived; reschedule as needed.
+- **Fires only when the Claude Code REPL is idle.** A long-running review delays the next tick. Jobs do not run concurrently.
+- **Approval prompts still apply.** If a run hits a permission prompt at 3am, it waits at the prompt until you return — the next tick won't help. Build out your allowlist (via Claude Code's "Yes, and don't ask again" option) before depending on the schedule for real coverage.
+- **Your machine must stay on** with Claude Code running. This is not headless cron.
+- **Built into Claude Code, not this agent.** The capability comes from the Claude Code runtime; this repo just documents how to use it with `/review-prs`. Refer to the Claude Code docs for full scheduler semantics.
+
+### 3. Headless via system cron (advanced, not yet documented end-to-end)
+
+For true unattended operation — runs while you're asleep, logged out, or away — Claude Code can run headlessly (`claude --dangerously-skip-permissions`, or `auto` mode on Team/Enterprise plans) from a real `crontab` entry. The skeleton looks like:
+
+```cron
+*/15 * * * * cd /path/to/project && claude --dangerously-skip-permissions -p "/review-prs" >> /tmp/pr-review.log 2>&1
+```
+
+**This path is not yet validated in this repo.** Running it safely requires real work that isn't built into the install:
+
+- A tightened deny list specifically scoped for unattended use (the default deny rules here are calibrated for interactive sessions where a human can catch missed cases).
+- Pre-flight validation that fails the run before any Forgejo/Codex/Slack call if env, identity, or connectivity look wrong.
+- Log capture and alerting on errors, since no human sees the output in real time.
+- An understanding that a prompt-injection attack inside a PR's content bypasses the per-prompt human gate that interactive mode provides.
+
+If you need full unattended operation, treat it as a separate hardening project. The in-session scheduler (option 2) covers most "reviews fire automatically while I'm working" needs without the additional risk surface.
+
 ## How the debate works
 
 Per PR:
