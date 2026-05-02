@@ -136,14 +136,22 @@ Claude Code provides scheduling primitives (`CronCreate` / `CronList` / `CronDel
 In any Claude Code session, ask:
 
 ```
-Schedule /review-prs to run every 15 minutes, durable so it survives restarts.
+Schedule /review-prs to run every 15 minutes.
 ```
 
 Claude Code creates a recurring job. To inspect: *"List active cron jobs."* To cancel: *"Delete cron job <id>."*
 
+Or use the bundled slash command for a one-shot setup that handles edge cases (cleaning up duplicate jobs, requesting durable mode, falling back to session-only):
+
+```
+/start-review-loop
+```
+
+That command attempts a durable schedule, reports what was actually created, and tells you whether to expect cross-session persistence on your Claude Code build.
+
 Important caveats:
 
-- **Session-bound by default.** The job dies when the terminal closes unless you ask for `durable: true`, which persists it to `.claude/scheduled_tasks.json` and survives Claude Code restarts.
+- **Session-bound by default.** The job dies when the terminal closes. Some Claude Code builds support a `durable: true` flag that persists the schedule to `.claude/scheduled_tasks.json` and survives restarts; **on other builds the flag is silently accepted but ignored, and the job remains session-only**. Run `/start-review-loop` (or list cron jobs after creating one) to confirm what your build actually did. If it shows `[session-only]` after you asked for durable, your build doesn't support it — recreate the schedule each session.
 - **Auto-expires after 7 days.** Cron jobs are intentionally short-lived; reschedule as needed.
 - **Fires only when the Claude Code REPL is idle.** A long-running review delays the next tick. Jobs do not run concurrently.
 - **Approval prompts still apply.** If a run hits a permission prompt at 3am, it waits at the prompt until you return — the next tick won't help. Build out your allowlist (via Claude Code's "Yes, and don't ask again" option) before depending on the schedule for real coverage.

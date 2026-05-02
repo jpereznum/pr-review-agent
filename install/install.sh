@@ -135,6 +135,10 @@ echo "  ✓ .claude/agents/pr-reviewer.md"
 substitute "$TEMPLATE_DIR/.claude/commands/review-prs.md.template" .claude/commands/review-prs.md
 echo "  ✓ .claude/commands/review-prs.md"
 
+# /start-review-loop helper (no placeholders, just copy)
+cp "$TEMPLATE_DIR/.claude/commands/start-review-loop.md" .claude/commands/start-review-loop.md
+echo "  ✓ .claude/commands/start-review-loop.md"
+
 # Settings (templated)
 if [[ -f .claude/settings.local.json ]]; then
   echo "  ! .claude/settings.local.json already exists — not overwriting"
