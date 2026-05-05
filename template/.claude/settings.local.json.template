@@ -4,6 +4,7 @@
   "_comment_3": "Deny rules catch dangerous patterns that should NEVER run, even if they happen to match an allow rule.",
   "_comment_4": "Adjust the {{FORGEJO_BASE_URL}}, {{REPO}}, and {{REVIEWER_USERNAME}} placeholders to your values via the install script.",
   "_comment_5": "Deliberately NOT included in deny: Bash(*sudo*), Bash(*ssh *), Bash(*scp *), Bash(*rsync *), Bash(git push*). These are commonly needed by other workflows that share .claude/settings.local.json with this agent (deployment, staging access, normal git operations). If you DO want them, add them to your local file after install. The PR review agent itself does not need any of them.",
+  "_comment_6": "Commit policy: `git commit -m`, `git commit -am`, and `git commit -a -m` are denied to prevent the agent from inlining commit messages on the command line (defense against accidentally committing junk in the user's main checkout). The /address-changes command commits via the explicit shape `cd /tmp/scratch_* && git commit -F /tmp/commit_msg_<run_id>.txt` (allowlisted), which uses a file-based commit message and runs only inside the scratch worktree. This prevents the agent from committing in the main checkout while still letting the author-side flow work.",
   "permissions": {
     "allow": [
       "Bash(curl -s -u {{REVIEWER_USERNAME}}:* -H cf-access-token:* {{FORGEJO_BASE_URL}}/api/v1/repos/{{REPO}}/*)",
@@ -157,6 +158,16 @@
       "Bash(git worktree prune)",
       "Bash(rm -rf /tmp/scratch_*)",
 
+      "Bash(cd /tmp/scratch_* && git diff*)",
+      "Bash(cd /tmp/scratch_* && git status*)",
+      "Bash(cd /tmp/scratch_* && git add *)",
+      "Bash(cd /tmp/scratch_* && git commit -F /tmp/commit_msg_*.txt)",
+      "Bash(cd /tmp/scratch_* && git push origin *)",
+      "Bash(cd /tmp/scratch_* && git log*)",
+
+      "Bash(kill -0 *)",
+      "Bash(head -1 /tmp/pr_review_agent.*.lock)",
+
       "Bash(pg_dump --schema-only *)",
       "Bash(psql --dbname=* -v ON_ERROR_STOP=1 -f /tmp/*.sql)",
       "Bash(diff /tmp/schema_*.sql /tmp/schema_*.sql)",
@@ -183,7 +194,6 @@
       "Read(**)",
       "Write(.claude/state/**)",
       "Write(.claude/audit/**)",
-      "Edit(.claude/audit/**)",
       "Write(/tmp/**)"
     ],
     "deny": [
@@ -193,7 +203,9 @@
       "Bash(rm -rf ~)",
       "Bash(rm -rf $HOME*)",
 
-      "Bash(git commit*)",
+      "Bash(git commit -m*)",
+      "Bash(git commit -am*)",
+      "Bash(git commit -a -m*)",
       "Bash(git config*)",
       "Bash(git clone*)",
       "Bash(git reset --hard*)",

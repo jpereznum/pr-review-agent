@@ -127,6 +127,35 @@ The agent runs tests against the user's real dev database (Approach A in the des
 - If multiple developers share the same dev DB, coordinate so the agent's test runs don't interleave with someone else's manual schema work.
 - For full isolation (separate test DB per run), upgrade to Shape B in the design discussion. The orchestrator template supports it; you'd add a step that spins up a Docker Postgres in the worktree and points `DATABASE_URL` at it.
 
+### T9 — Author-side commits land on the wrong branch or contaminate `main`
+
+The `/address-changes` command commits and pushes on the user's behalf. Two failure modes are specifically guarded against:
+
+- **Committing in the user's main checkout instead of the scratch worktree.** A naive implementation might `cd` into the project root, edit files, and `git commit` — landing the change directly on whichever branch is currently checked out (often `main`). Even worse, the change might be `git push origin main`-ed if the user trusts the agent.
+- **Staging files the agent didn't intentionally edit.** A `git add .` would catch leftover artifacts from prior tooling runs, transient files, debug output, and commit them all alongside the intended fix.
+
+**Mitigations:**
+
+- Hard Rule 12 (no main checkout mutation) applies symmetrically to `/address-changes`. The subagent (`pr-author-fixer.md`) operates only inside `/tmp/scratch_<run_id>/` (a `git worktree add` with detached or branch-tracking checkout). Any attempt to write to the main checkout halts the run.
+- Hard Rule 16 (staging discipline) requires the orchestrator to track an explicit `EDITED_FILES` list and pass it verbatim to `git add`. `git add .` and globs are forbidden. If `git status --short` after staging shows files outside `EDITED_FILES`, the run halts with an internal error.
+- The settings allowlist denies `git commit -m`, `git commit -am`, and `git commit -a -m` (the shapes that inline a message and bypass the file-based commit pattern). It allows only `cd /tmp/scratch_* && git commit -F /tmp/commit_msg_<run_id>.txt` — file-based message, scratch-worktree-only.
+- Hard Rule 17 (commit identity) requires every commit to include `Addresses-review: #<id>` and a `Co-authored-by: Claude (PR review agent) <noreply@anthropic.com>` trailer, making the agent's involvement visible in `git log` and Forgejo's commit view.
+
+**Residual risk:** the user explicitly approves the final push (Step 8 — the one human gate). If the user approves a push that contains the wrong content, that's an authorization the safety layer can't override. The mitigation is the gate's information density: the user sees the diff stat, file list, Codex verdict, and verification results before approving. A user who clicks "approve" without reading takes on responsibility for the result.
+
+### T10 — Overlapping runs corrupt the audit log or worktree
+
+The `/address-changes` command can be triggered manually, by auto-discovery, and from cron — sometimes simultaneously. Without a concurrency guard, two runs targeting the same PR could both set up worktrees with the same `run_id`, write conflicting audit records, race on the per-PR lock file, or push commits in an interleaved order that confuses Forgejo's review state.
+
+**Mitigations:**
+
+- Hard Rule 14 (per-PR lock) requires every run to acquire `/tmp/pr_review_agent.<PR>.lock` with the run's PID before processing the PR. If the lock exists and the holding PID is alive, the run skips that PR (outcome `halted_lock_held_by_other`). If the lock exists but the PID is dead, the run treats it as stale, removes it, and proceeds.
+- Different PRs are allowed to run concurrently. The lock is per-PR, not per-agent.
+- Worktree paths embed the run ID (`/tmp/scratch_<run_id>/`), so even if two runs somehow touched the same PR (which the lock prevents), their worktrees would be in different paths and would not interfere.
+- Audit record filenames embed the run ID and timestamp, so file-write races are prevented at the filesystem level.
+
+**Residual risk:** Claude Code's REPL-idle scheduling for cron jobs serializes ticks within a single Claude Code session. Across multiple sessions (manual + cron + auto-discovery from another window), the lock is the only safety. If all three paths fire on the same PR at exactly the same second, two might briefly observe the lock as absent — but the second to call `echo $$ > $LOCK` overwrites the first, and only the surviving PID's run will continue while the first's subsequent operations would notice the lock no longer matches its PID. This is a known small race; treat it as an acceptable residual risk for the current scale of usage.
+
 ## What the agent does NOT do (security boundaries)
 
 - Does not auto-merge PRs.

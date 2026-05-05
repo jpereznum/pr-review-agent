@@ -121,6 +121,52 @@ The agent will:
 
 If no PRs are assigned to you, the agent reports "nothing to do" and exits without writing audit records.
 
+## Author-side feedback (`/address-changes`)
+
+The reviewer-side flow (`/review-prs`) handles PRs where you're a reviewer. The author-side flow (`/address-changes`) handles the inverse: PRs you authored, where someone has reviewed your work and requested changes.
+
+Run it three ways:
+
+```
+/address-changes 1949           # explicit PR number
+/address-changes                # auto-discover your PRs with unaddressed REQUEST_CHANGES
+```
+
+Or schedule it the same way as `/review-prs` via the in-session scheduler — the same cron tick can run both.
+
+### Flow
+
+1. **Find PR(s):** read the latest REQUEST_CHANGES review on each in-scope PR. If the PR's HEAD has moved past the reviewed SHA, the review is presumed addressed; skipped.
+2. **Acquire per-PR lock** at `/tmp/pr_review_agent.<pr>.lock`. Different PRs run concurrently; the same PR never runs twice in parallel.
+3. **Set up scratch worktree** at `/tmp/scratch_<run_id>/` via `git worktree add`. The user's main checkout is never modified.
+4. **Verify the reviewer's blockers** in the worktree (read code, confirm the reviewer is right). Misdiagnosed claims are flagged in the plan, not silently followed.
+5. **Draft Plan v1** — markdown, file-by-file, source changes + tests + held-back-or-out-of-scope notes.
+6. **Codex critique** (mandatory, never skipped). Three possible verdicts:
+   - `APPROVE` → proceed.
+   - `APPROVE_WITH_REFINEMENTS` → fold corrections into Plan v2; proceed (no second Codex round).
+   - `REJECT` or `DISAGREE_OUT_OF_SCOPE` → halt. Worktree torn down (it was never edited). User DMed.
+7. **Auto-implement** in the worktree (only after Codex approves).
+8. **Run verification:** `tsc -b`, `lint`, `pytest`/`vitest` for the touched files. Two retries on test failures (real bugs get patched, library-misunderstanding tests get corrected). Schema-touching tests apply the snapshot+revert protocol.
+9. **Show user the diff + receipts → ask for push approval** (the one human gate).
+10. **On approval:** commit (with `Addresses-review: #<id>` footer + `Co-authored-by: Claude (PR review agent)` trailer), push to the PR branch, post a Forgejo reply referencing the review and new commit, DM the reviewer, tear down the worktree, write the audit record.
+
+### Out-of-scope handling
+
+When the agent's plan classifies a reviewer's request as out of scope (belongs in a separate PR, requires upstream refactoring, contradicts the PR's purpose), the plan is sent to Codex with bias-aware prompting: *"The author claims this is out of scope. Authors have an obvious incentive to defer work; audit hard."* If Codex agrees, the plan proceeds with in-scope-only changes plus a PR reply explaining the deferral. If Codex disagrees, the run halts and the user decides whether to override.
+
+### What `/address-changes` does NOT do
+
+- Approve, merge, or close PRs (those stay with the human reviewer).
+- Modify the user's main checkout (Hard Rule 12, same as `/review-prs`).
+- Push without explicit user approval (the one gate).
+- Skip Codex critique (Codex approval is mandatory before any file edit).
+- Run with hardcoded credentials (env-loaded only, same as `/review-prs`).
+- Use `git add .` or globs when staging — only files the agent intentionally edited.
+
+### Audit records
+
+Stored at `.claude/audit/<YYYY-MM-DD>/<pr>_<sha>_addresschanges_<HHMMSS>.{json,plan.md,codex.md,review.md,diff,posted.json}` with an `index.jsonl` entry. The plan markdown, Codex's critique, and the diff are all preserved per run for archaeology.
+
 ## Automation options
 
 Three ways to run `/review-prs`, in increasing order of autonomy:

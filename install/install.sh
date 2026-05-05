@@ -127,13 +127,19 @@ mkdir -p .claude/agents .claude/commands .claude/state .claude/audit
 # ----- Install files -----
 echo "Installing files..."
 
-# Subagent (no placeholders, just copy)
+# Subagents (no placeholders, just copy)
 cp "$TEMPLATE_DIR/.claude/agents/pr-reviewer.md" .claude/agents/pr-reviewer.md
 echo "  ✓ .claude/agents/pr-reviewer.md"
 
-# Orchestrator (templated)
+cp "$TEMPLATE_DIR/.claude/agents/pr-author-fixer.md" .claude/agents/pr-author-fixer.md
+echo "  ✓ .claude/agents/pr-author-fixer.md"
+
+# Orchestrators (templated)
 substitute "$TEMPLATE_DIR/.claude/commands/review-prs.md.template" .claude/commands/review-prs.md
 echo "  ✓ .claude/commands/review-prs.md"
+
+substitute "$TEMPLATE_DIR/.claude/commands/address-changes.md.template" .claude/commands/address-changes.md
+echo "  ✓ .claude/commands/address-changes.md"
 
 # /start-review-loop helper (no placeholders, just copy)
 cp "$TEMPLATE_DIR/.claude/commands/start-review-loop.md" .claude/commands/start-review-loop.md
@@ -210,7 +216,9 @@ echo
 echo "  4. Start a Claude Code session in this directory:"
 echo "       claude"
 echo
-echo "  5. In the session, run:"
-echo "       /review-prs"
+echo "  5. In the session, run either:"
+echo "       /review-prs           # review PRs assigned to you"
+echo "       /address-changes      # address REQUEST_CHANGES on PRs you authored"
+echo "       /start-review-loop    # schedule recurring /review-prs (in-session)"
 echo
 echo "See README.md in the cloned repo for full documentation."
